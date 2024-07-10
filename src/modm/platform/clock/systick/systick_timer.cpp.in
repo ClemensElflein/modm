@@ -32,7 +32,7 @@ extern "C" void
 %% if has_freertos
 vApplicationTickHook()
 %% else
-SysTick_Handler(void)
+Modm_SysTick_Handler(void)
 %% endif
 {
 	milli_time += systick_step;
