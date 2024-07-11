@@ -46,6 +46,8 @@ def build(env):
 
         # Compiler options for targets
         env.collect(":build:linkflags", "--specs=nosys.specs")
-        if not env.get(":stdc++:exceptions", False):
-            # Newlib Nano does not support C++ exceptions at all
-            env.collect(":build:linkflags", "--specs=nano.specs")
+        # Deactivated, since we don't want nano.specs even without exceptions
+        # Reason is, it uses malloc() for stuff e.g. rand().
+        #if not env.get(":stdc++:exceptions", False):
+        #    # Newlib Nano does not support C++ exceptions at all
+        #    env.collect(":build:linkflags", "--specs=nano.specs")
