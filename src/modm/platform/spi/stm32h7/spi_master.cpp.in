@@ -47,32 +47,23 @@ SpiMaster{{ id }}::transfer(
     transfer_len = length;
     tx_len = 0;
     rx_len = 0;
-  // Clear remaining RX (if there is any)
-  while(Hal::isRxDataAvailable()) {
-    Hal::read();
-  }
-  Hal::acknowledgeInterruptFlags(
-      Hal::StatusFlag::EndOfTransfer |
-      Hal::StatusFlag::TxTransferFilled |
-      Hal::StatusFlag::Underrun |
-      Hal::StatusFlag::Overrun |
-      Hal::StatusFlag::CrcError |
-      Hal::StatusFlag::TiFrameError |
-      Hal::StatusFlag::ModeFault |
-      Hal::StatusFlag::Reload |
-      Hal::StatusFlag::Suspension
-);
+
+    Hal::enableTransfer();
+    Hal::startMasterTransfer();
+
+    // Clear remaining RX (if there is any)
+    while(Hal::isRxDataAvailable()) {
+      Hal::read();
+    }
 
     // start actual transmission by enabling TxPacketSpaceAvailable interrupt
     Hal::enableInterrupt(Hal::Interrupt::TxPacketSpaceAvailable | Hal::Interrupt::RxPacketAvailable);
 
-    Hal::enableTransfer();
-    Hal::startMasterTransfer();
     
-    finishTransfer();
+    ULONG actual = 0;
+    tx_event_flags_get(&events, EVENT_TX_IDLE, TX_AND, &actual, TX_WAIT_FOREVER);
     tx_mutex_put(&mtx);
-	return {modm::rf::Stop};
-
+    return {modm::rf::Stop};
 }
 
 void
@@ -80,20 +71,6 @@ SpiMaster{{ id }}::finishTransfer()
 {
     ULONG actual = 0;
     tx_event_flags_get(&events, EVENT_TX_IDLE, TX_AND, &actual, TX_WAIT_FOREVER);
-    Hal::suspendMasterTransfer();
-    Hal::disableTransfer();
-
-	Hal::acknowledgeInterruptFlags(
-		Hal::StatusFlag::EndOfTransfer |
-		Hal::StatusFlag::TxTransferFilled |
-		Hal::StatusFlag::Underrun |
-		Hal::StatusFlag::Overrun |
-		Hal::StatusFlag::CrcError |
-		Hal::StatusFlag::TiFrameError |
-		Hal::StatusFlag::ModeFault |
-		Hal::StatusFlag::Reload |
-		Hal::StatusFlag::Suspension
-	);
 }
 
 void

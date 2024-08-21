@@ -103,8 +103,6 @@ public:
 	{
 		finishTransfer();
 		Hal::setDataMode(mode);
-		Hal::enableTransfer();
-		Hal::startMasterTransfer();
 	}
 
 	static void
@@ -112,8 +110,6 @@ public:
 	{
 		finishTransfer();
 		Hal::setDataOrder(order);
-		Hal::enableTransfer();
-		Hal::startMasterTransfer();
 	}
 
 	static void
@@ -121,8 +117,6 @@ public:
 	{
 		finishTransfer();
 		Hal::setDataSize(static_cast<SpiHal{{ id }}::DataSize>(size));
-		Hal::enableTransfer();
-		Hal::startMasterTransfer();
 	}
 
 	static uint8_t
