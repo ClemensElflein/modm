@@ -26,6 +26,7 @@
 #include <modm/processing/fiber.hpp>
 %% endif
 #include "spi_hal_{{ id }}.hpp"
+#include <tx_api.h>
 
 namespace modm::platform
 {
@@ -48,6 +49,17 @@ public:
 	using DataMode = Hal::DataMode;
 	using DataOrder = Hal::DataOrder;
 	using DataSize = Hal::DataSize;
+	
+	  static TX_EVENT_FLAGS_GROUP events;
+	  static TX_MUTEX mtx;
+
+	  static const uint8_t * volatile txbuf;
+	  static uint8_t *volatile rxbuf;
+	  static volatile size_t transfer_len;
+	  static volatile size_t rx_len;
+	  static volatile size_t tx_len;
+
+	  static constexpr ULONG EVENT_TX_IDLE = 1;
 
 	template< class... Signals >
 	static void
@@ -68,6 +80,9 @@ public:
 	static void
 	initialize()
 	{
+		tx_event_flags_create(&events, "spi events");
+		tx_event_flags_set(&events, EVENT_TX_IDLE, TX_OR);
+		tx_mutex_create(&mtx, "spi mtx", TX_NO_INHERIT);
 		constexpr auto result = modm::Prescaler::from_power(SystemClock::Spi{{ id }}, baudrate, 2, 256);
 		assertBaudrateInTolerance< result.frequency, baudrate, tolerance >();
 
@@ -80,6 +95,7 @@ public:
 		Hal::initialize(prescaler);
 		Hal::enableTransfer();
 		Hal::startMasterTransfer();
+		Hal::enableInterruptVector(true, 12);
 	}
 
 	static void
@@ -127,6 +143,8 @@ public:
 
 	static modm::ResumableResult<void>
 	transfer(const uint8_t* tx, uint8_t* rx, std::size_t length);
+	static void isr();
+
 
 private:
 	static void

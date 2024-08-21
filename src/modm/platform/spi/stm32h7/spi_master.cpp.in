@@ -16,6 +16,8 @@
 // ----------------------------------------------------------------------------
 
 #include "spi_master_{{id}}.hpp"
+#include <modm/architecture/interface/interrupt.hpp>
+
 
 namespace modm::platform
 {
@@ -23,125 +25,63 @@ namespace modm::platform
 modm::ResumableResult<uint8_t>
 SpiMaster{{ id }}::transfer(uint8_t data)
 {
-%% if use_fiber
-	while (Hal::isTxFifoFull())
-		modm::this_fiber::yield();
-
-	Hal::write(data);
-
-	while (!Hal::isRxDataAvailable())
-		modm::this_fiber::yield();
-
-	return Hal::read();
-%% else
-	// this is a manually implemented "fast resumable function"
-	// there is no context or nesting protection, since we don't need it.
-	// there are only two states encoded into 1 bit (LSB of state):
-	//   1. waiting to start, and
-	//   2. waiting to finish.
-
-	if (!(state & Bit0))
-	{
-		// wait for previous transfer to finish
-		if (Hal::isTxFifoFull())
-			return {modm::rf::Running};
-
-		Hal::write(data);
-
-		// set LSB = Bit0
-		state |= Bit0;
-	}
-
-	if (!Hal::isRxDataAvailable())
-		return {modm::rf::Running};
-
-	data = Hal::read();
-
-	state &= ~Bit0;
-	return {modm::rf::Stop, data};
-%% endif
+	uint8_t rx;
+	RF_CALL_BLOCKING(transfer(&data, &rx, 1));
+	return {modm::rf::Stop, rx};
 }
 
 modm::ResumableResult<void>
 SpiMaster{{ id }}::transfer(
 		const uint8_t* tx, uint8_t* rx, std::size_t length)
 {
-%% if use_fiber
-	std::size_t rxIndex = 0;
-	std::size_t txIndex = 0;
 
-	while (rxIndex < length) {
-		while ((txIndex < length) and !Hal::isTxFifoFull()) {
-			Hal::write(tx ? tx[txIndex] : 0);
-			++txIndex;
-		}
-		while ((rxIndex < length) and Hal::isRxDataAvailable()) {
-			const uint8_t data = Hal::read();
-			if (rx) {
-				rx[rxIndex] = data;
-			}
-			++rxIndex;
-		}
-		if (rxIndex < length) {
-			modm::this_fiber::yield();
-		}
-	}
-%% else
-	// this is a manually implemented "fast resumable function"
-	// there is no context or nesting protection, since we don't need it.
-	// there are only two states encoded into 1 bit (Bit1 of state):
-	//   1. initialize index, and
-	//   2. wait for transfer to finish.
+    if((tx == nullptr && rx == nullptr) || length == 0) {
+      return {modm::rf::Stop};
+    }
+    tx_mutex_get(&mtx, TX_WAIT_FOREVER);
+    // Clear EVENT_TX_IDLE flag
+    tx_event_flags_set(&events, ~EVENT_TX_IDLE, TX_AND);
 
-	// we need to globally remember which byte we are currently transferring
-	static std::size_t rxIndex = 0;
-	static std::size_t txIndex = 0;
+    txbuf = tx;
+    rxbuf = rx;
+    transfer_len = length;
+    tx_len = 0;
+    rx_len = 0;
+  // Clear remaining RX (if there is any)
+  while(Hal::isRxDataAvailable()) {
+    Hal::read();
+  }
+  Hal::acknowledgeInterruptFlags(
+      Hal::StatusFlag::EndOfTransfer |
+      Hal::StatusFlag::TxTransferFilled |
+      Hal::StatusFlag::Underrun |
+      Hal::StatusFlag::Overrun |
+      Hal::StatusFlag::CrcError |
+      Hal::StatusFlag::TiFrameError |
+      Hal::StatusFlag::ModeFault |
+      Hal::StatusFlag::Reload |
+      Hal::StatusFlag::Suspension
+);
 
-	// we are only interested in Bit1
-	switch(state & Bit1)
-	{
-		case 0:
-			// we will only visit this state once
-			state |= Bit1;
+    // start actual transmission by enabling TxPacketSpaceAvailable interrupt
+    Hal::enableInterrupt(Hal::Interrupt::TxPacketSpaceAvailable | Hal::Interrupt::RxPacketAvailable);
 
-			// initialize index and check range
-			rxIndex = 0;
-			txIndex = 0;
-			while (rxIndex < length) {
-		default:
-		{
-				while ((txIndex < length) and !Hal::isTxFifoFull()) {
-					Hal::write(tx ? tx[txIndex] : 0);
-					++txIndex;
-				}
-				while ((rxIndex < length) and Hal::isRxDataAvailable()) {
-					if (rx) {
-						rx[rxIndex] = Hal::read();
-					} else {
-						Hal::read();
-					}
-					++rxIndex;
-				}
-				if (rxIndex < length) {
-					return {modm::rf::Running};
-				}
-		}
-			}
+    Hal::enableTransfer();
+    Hal::startMasterTransfer();
+    
+    finishTransfer();
+    tx_mutex_put(&mtx);
+	return {modm::rf::Stop};
 
-			// clear the state
-			state &= ~Bit1;
-			return {modm::rf::Stop};
-	}
-%% endif
 }
 
 void
 SpiMaster{{ id }}::finishTransfer()
 {
-	if (Hal::isTransferEnabled()) {
-		while (!(Hal::status() & Hal::StatusFlag::TxTransferComplete));
-		Hal::disableTransfer();
-	}
+    ULONG actual = 0;
+    tx_event_flags_get(&events, EVENT_TX_IDLE, TX_AND, &actual, TX_WAIT_FOREVER);
+    Hal::suspendMasterTransfer();
+    Hal::disableTransfer();
 
 	Hal::acknowledgeInterruptFlags(
 		Hal::StatusFlag::EndOfTransfer |
@@ -155,5 +95,58 @@ SpiMaster{{ id }}::finishTransfer()
 		Hal::StatusFlag::Suspension
 	);
 }
+
+void
+SpiMaster{{ id }}::isr()
+{
+const auto flags = Hal::status();
+
+    if(tx_len != transfer_len && flags.any(SpiBase::StatusFlag::TxPacketSpaceAvailable)) {
+      while((tx_len < transfer_len) && !Hal::isTxFifoFull()) {
+        Hal::write(txbuf ? txbuf[tx_len] : 0);
+        ++tx_len;
+      }
+      
+      if(tx_len == transfer_len) {
+      	Hal::disableInterrupt(Hal::Interrupt::TxPacketSpaceAvailable);
+      }
+    }
+
+    if(rx_len != transfer_len && flags.any(SpiBase::StatusFlag::RxPacketAvailable)) {
+      while((rx_len < transfer_len) && Hal::isRxDataAvailable()) {
+        if(rxbuf) {
+          rxbuf[rx_len] = Hal::read();
+        } else {
+          Hal::read();
+        }
+        ++rx_len;
+      }
+      
+      if(rx_len == transfer_len) {
+    	Hal::disableInterrupt(Hal::Interrupt::RxPacketAvailable);
+        Hal::suspendMasterTransfer();
+        Hal::disableTransfer();
+        tx_event_flags_set(&events, EVENT_TX_IDLE, TX_OR);
+      }
+
+    }
+
+
+    Hal::acknowledgeInterruptFlags(flags);
+}
+
+MODM_ISR(SPI{{ id }}) {
+    SpiMaster{{ id }}::isr();
+  }
+  
+ 
+const uint8_t * volatile SpiMaster{{ id }}::txbuf = nullptr;
+uint8_t *volatile SpiMaster{{ id }}::rxbuf = nullptr;
+volatile size_t SpiMaster{{ id }}::transfer_len = 0;
+volatile size_t SpiMaster{{ id }}::tx_len = 0;
+volatile size_t SpiMaster{{ id }}::rx_len = 0;
+TX_EVENT_FLAGS_GROUP SpiMaster{{ id }}::events{};
+TX_MUTEX SpiMaster{{ id }}::mtx{};
+  
 
 } // namespace modm::platform
